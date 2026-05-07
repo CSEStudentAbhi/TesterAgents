@@ -238,7 +238,7 @@ with st.sidebar:
 # Main App
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("# 🔍 CodeScan — MERN Static Analyzer")
-st.markdown("<div style='color:#64748b; margin-bottom:24px'>Upload your MERN project as a ZIP file. All agents will scan your code live.</div>", unsafe_allow_html=True)
+st.markdown("<div style='color:#64748b; margin-bottom:24px'>Upload your MERN project as a ZIP file <b>or</b> enter a local folder path. All agents will scan your code live.</div>", unsafe_allow_html=True)
 
 # Session state
 if "scan_done" not in st.session_state:
@@ -251,121 +251,155 @@ if "scan_stats" not in st.session_state:
 # ── Upload Section ─────────────────────────────────────────────────────────────
 if not st.session_state.scan_done:
     st.markdown("### 📁 Upload Your Project")
+
+    # ── Option A: ZIP upload ───────────────────────────────────────────────────
     uploaded = st.file_uploader(
         "Drop your MERN project ZIP here",
         type=["zip"],
         help="Zip your entire project folder (node_modules will be skipped automatically)"
     )
 
-    if uploaded:
+    # ── Visual OR divider ──────────────────────────────────────────────────────
+    st.markdown("""
+    <div style="display:flex;align-items:center;gap:12px;margin:18px 0;">
+        <div style="flex:1;height:1px;background:#1f2937;"></div>
+        <div style="color:#4b5563;font-size:0.85rem;font-weight:600;letter-spacing:0.1em;">OR</div>
+        <div style="flex:1;height:1px;background:#1f2937;"></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Option B: Local folder path ────────────────────────────────────────────
+    st.markdown("<div style='color:#94a3b8;font-size:0.9rem;margin-bottom:6px'>📂 <b>Local Folder Path</b> — scan a folder directly on this machine</div>", unsafe_allow_html=True)
+    col_path, col_scan_btn = st.columns([4, 1])
+    with col_path:
+        folder_path = st.text_input(
+            "folder_path_input",
+            placeholder="e.g. C:\\Users\\you\\my-mern-project  or  /home/user/project",
+            label_visibility="collapsed"
+        )
+    with col_scan_btn:
+        folder_scan_btn = st.button("🚀 Scan Folder", use_container_width=True, disabled=not bool(folder_path and folder_path.strip()))
+
+    # ── Determine what was submitted ───────────────────────────────────────────
+    use_zip    = uploaded is not None
+    use_folder = folder_scan_btn and folder_path and folder_path.strip()
+
+    # ZIP: show file info + scan button
+    if use_zip and not use_folder:
         col1, col2 = st.columns([3, 1])
         with col1:
             st.success(f"✅ **{uploaded.name}** uploaded — {uploaded.size // 1024} KB")
         with col2:
             start_btn = st.button("🚀 Start Scan", use_container_width=True)
+    else:
+        start_btn = False
 
-        if start_btn:
-            st.markdown("---")
-            st.markdown("### ⚡ Live Scan Terminal")
+    # ── Shared scan runner ─────────────────────────────────────────────────────
+    def run_scan_ui(extract_dir, project_label, tmp_dir_to_cleanup=None):
+        """Runs the live scan UI for a given directory."""
+        st.markdown("---")
+        st.markdown("### ⚡ Live Scan Terminal")
 
-            # Progress + terminal placeholders
-            progress_bar  = st.progress(0, text="Initializing...")
-            terminal_ph   = st.empty()
-            status_ph     = st.empty()
+        progress_bar = st.progress(0, text="Initializing...")
+        terminal_ph  = st.empty()
 
-            terminal_lines = [
-                render_terminal_line("t-prompt", "$ codescan --agents=all --live"),
-                render_terminal_line("t-info",   "  Extracting project files..."),
-            ]
+        terminal_lines = [
+            render_terminal_line("t-prompt", "$ codescan --agents=all --live"),
+            render_terminal_line("t-info",   f"  Scanning: <b>{project_label}</b>"),
+        ]
+        terminal_ph.markdown(build_terminal_html(terminal_lines), unsafe_allow_html=True)
+
+        state = {"total_files": 0, "current_file": "", "current_agent": ""}
+
+        def on_event(ev):
+            etype = ev.get("type")
+
+            if etype == "scan:start":
+                state["total_files"] = ev["total_files"]
+                terminal_lines.append(render_terminal_line("t-info", f"  Found <b>{state['total_files']}</b> files to scan"))
+                terminal_lines.append(render_terminal_line("t-info", "  ─────────────────────────────────────"))
+
+            elif etype == "scan:file":
+                state["current_file"] = ev["file"]
+                idx         = ev["index"]
+                total_files = state["total_files"]
+                pct         = int((idx / max(total_files, 1)) * 100)
+                progress_bar.progress(pct / 100, text=f"Scanning {idx}/{total_files}: {state['current_file']}")
+                terminal_lines.append(
+                    render_terminal_line("t-file", f"  📄 [{idx}/{total_files}] {state['current_file']}")
+                )
+
+            elif etype == "scan:agent":
+                state["current_agent"] = ev["agent"]
+                emoji = AGENT_EMOJI.get(state["current_agent"], "🤖")
+                terminal_lines.append(
+                    render_terminal_line("t-agent", f"     {emoji} Running {state['current_agent']} Agent...")
+                )
+
+            elif etype == "scan:issue":
+                issue = ev["issue"]
+                sev   = issue.get("severity", "info")
+                rid   = issue.get("rule_id", "")
+                name  = issue.get("rule_name", "")
+                line  = issue.get("line", "?")
+                cls   = {"critical": "t-critical", "warning": "t-warning", "info": "t-issue-info"}.get(sev, "t-issue-info")
+                emoji = SEVERITY_EMOJI.get(sev, "")
+                terminal_lines.append(
+                    render_terminal_line(cls, f"       {emoji} [{rid}] {name} — Line {line}")
+                )
+
+            elif etype == "scan:done":
+                progress_bar.progress(1.0, text="✅ Scan complete!")
+                terminal_lines.append(render_terminal_line("t-info", "  ─────────────────────────────────────"))
+                terminal_lines.append(
+                    render_terminal_line("t-done", f"  ✅ Scan complete! Found <b>{ev['total_issues']}</b> issues.")
+                )
+
+            elif etype == "scan:error":
+                terminal_lines.append(
+                    render_terminal_line("t-error", f"  ⚠ Could not read: {ev['file']}")
+                )
+
+            if len(terminal_lines) > 80:
+                terminal_lines.pop(2)
+
             terminal_ph.markdown(build_terminal_html(terminal_lines), unsafe_allow_html=True)
 
-            # Extract zip
-            try:
-                extract_dir, tmp_dir = extract_zip(uploaded)
-            except Exception as e:
-                st.error(f"❌ Failed to extract ZIP: {e}")
-                st.stop()
+        with st.spinner(""):
+            all_issues = run_scan(extract_dir, on_event)
 
-            issues_collected = []
-            # Use a mutable dict so nested on_event can mutate without nonlocal
-            state = {"total_files": 0, "current_file": "", "current_agent": ""}
+        if tmp_dir_to_cleanup:
+            cleanup(tmp_dir_to_cleanup)
 
-            def on_event(ev):
+        st.session_state.issues = all_issues
+        st.session_state.scan_done = True
+        st.session_state.scan_stats = {
+            "total":    len(all_issues),
+            "critical": sum(1 for i in all_issues if i["severity"] == "critical"),
+            "warning":  sum(1 for i in all_issues if i["severity"] == "warning"),
+            "info":     sum(1 for i in all_issues if i["severity"] == "info"),
+            "project":  project_label,
+        }
+        time.sleep(0.5)
+        st.rerun()
 
-                etype = ev.get("type")
+    # ── Trigger: ZIP scan ──────────────────────────────────────────────────────
+    if start_btn and use_zip:
+        try:
+            extract_dir, tmp_dir = extract_zip(uploaded)
+        except Exception as e:
+            st.error(f"❌ Failed to extract ZIP: {e}")
+            st.stop()
+        run_scan_ui(extract_dir, uploaded.name, tmp_dir_to_cleanup=tmp_dir)
 
-                if etype == "scan:start":
-                    state["total_files"] = ev["total_files"]
-                    terminal_lines.append(render_terminal_line("t-info", f"  Found <b>{state['total_files']}</b> files to scan"))
-                    terminal_lines.append(render_terminal_line("t-info", "  ─────────────────────────────────────"))
-
-                elif etype == "scan:file":
-                    state["current_file"] = ev["file"]
-                    idx          = ev["index"]
-                    total_files  = state["total_files"]
-                    pct          = int((idx / max(total_files, 1)) * 100)
-                    progress_bar.progress(pct / 100, text=f"Scanning {idx}/{total_files}: {state['current_file']}")
-                    terminal_lines.append(
-                        render_terminal_line("t-file", f"  📄 [{idx}/{total_files}] {state['current_file']}")
-                    )
-
-                elif etype == "scan:agent":
-                    state["current_agent"] = ev["agent"]
-                    emoji = AGENT_EMOJI.get(state["current_agent"], "🤖")
-                    terminal_lines.append(
-                        render_terminal_line("t-agent", f"     {emoji} Running {state['current_agent']} Agent...")
-                    )
-
-                elif etype == "scan:issue":
-                    issue = ev["issue"]
-                    issues_collected.append(issue)
-                    sev   = issue.get("severity", "info")
-                    rid   = issue.get("rule_id", "")
-                    name  = issue.get("rule_name", "")
-                    line  = issue.get("line", "?")
-                    cls   = {"critical": "t-critical", "warning": "t-warning", "info": "t-issue-info"}.get(sev, "t-issue-info")
-                    emoji = SEVERITY_EMOJI.get(sev, "")
-                    terminal_lines.append(
-                        render_terminal_line(cls, f"       {emoji} [{rid}] {name} — Line {line}")
-                    )
-
-                elif etype == "scan:done":
-                    progress_bar.progress(1.0, text="✅ Scan complete!")
-                    terminal_lines.append(render_terminal_line("t-info", "  ─────────────────────────────────────"))
-                    terminal_lines.append(
-                        render_terminal_line("t-done", f"  ✅ Scan complete! Found <b>{ev['total_issues']}</b> issues.")
-                    )
-
-                elif etype == "scan:error":
-                    terminal_lines.append(
-                        render_terminal_line("t-error", f"  ⚠ Could not read: {ev['file']}")
-                    )
-
-                # Keep only last 80 terminal lines for performance
-                if len(terminal_lines) > 80:
-                    terminal_lines.pop(2)
-
-                terminal_ph.markdown(build_terminal_html(terminal_lines), unsafe_allow_html=True)
-
-            # Run scan
-            with st.spinner(""):
-                all_issues = run_scan(extract_dir, on_event)
-
-            cleanup(tmp_dir)
-
-            # Save to session
-            st.session_state.issues = all_issues
-            st.session_state.scan_done = True
-            st.session_state.scan_stats = {
-                "total": len(all_issues),
-                "critical": sum(1 for i in all_issues if i["severity"] == "critical"),
-                "warning":  sum(1 for i in all_issues if i["severity"] == "warning"),
-                "info":     sum(1 for i in all_issues if i["severity"] == "info"),
-                "project":  uploaded.name,
-            }
-
-            time.sleep(0.5)
-            st.rerun()
+    # ── Trigger: Folder scan ───────────────────────────────────────────────────
+    if use_folder:
+        folder_path = folder_path.strip().strip('"').strip("'")
+        if not os.path.isdir(folder_path):
+            st.error(f"❌ Folder not found: `{folder_path}`  — Make sure the path exists on this machine.")
+        else:
+            project_label = os.path.basename(folder_path.rstrip("/\\")) or folder_path
+            run_scan_ui(folder_path, project_label)
 
 # ── Results Section ────────────────────────────────────────────────────────────
 else:
